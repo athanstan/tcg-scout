@@ -1,0 +1,7 @@
+/.DS_Store
+/bin/
+/tcg-scout
+/output/
+*.test
+*.out
+coverage.txt
