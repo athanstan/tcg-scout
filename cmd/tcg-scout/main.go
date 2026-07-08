@@ -10,6 +10,7 @@ import (
 	"tcg-scout/internal/app"
 	"tcg-scout/internal/cli"
 	svecards "tcg-scout/internal/tcg/sve/cards"
+	svedecks "tcg-scout/internal/tcg/sve/decks"
 )
 
 var (
@@ -22,7 +23,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	service, err := app.NewService(svecards.NewRunner())
+	service, err := app.NewService(svecards.NewRunner(), svedecks.NewRunner())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

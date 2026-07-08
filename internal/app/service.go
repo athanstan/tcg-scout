@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -23,6 +24,9 @@ type Request struct {
 	WebPQuality      float64 `json:"webp_quality,omitempty"`
 	ImageConcurrency int     `json:"image_concurrency,omitempty"`
 	PageConcurrency  int     `json:"page_concurrency,omitempty"`
+	TournamentURL    string  `json:"tournament_url,omitempty"`
+	OutputDecksDir   string  `json:"output_decks_dir,omitempty"`
+	DeckConcurrency  int     `json:"deck_concurrency,omitempty"`
 }
 
 func DefaultRequest() Request {
@@ -34,6 +38,8 @@ func DefaultRequest() Request {
 		WebPQuality:      100,
 		ImageConcurrency: 8,
 		PageConcurrency:  4,
+		OutputDecksDir:   "output/decks",
+		DeckConcurrency:  4,
 	}
 }
 
@@ -51,8 +57,9 @@ func (r Request) ScraperConfig() scraper.Config {
 }
 
 type Result struct {
-	Summary Summary        `json:"summary"`
-	Cards   []scraper.Card `json:"cards,omitempty"`
+	Summary    Summary          `json:"summary"`
+	Cards      []scraper.Card   `json:"cards,omitempty"`
+	Tournament json.RawMessage  `json:"tournament,omitempty"`
 }
 
 type Summary struct {
@@ -61,6 +68,8 @@ type Summary struct {
 	Scraper        string `json:"scraper"`
 	Action         string `json:"action"`
 	CardCount      int    `json:"card_count,omitempty"`
+	DeckCount      int    `json:"deck_count,omitempty"`
+	Format         string `json:"format,omitempty"`
 	OutputJSONPath string `json:"output_json_path,omitempty"`
 	ImagesDir      string `json:"images_dir,omitempty"`
 	Message        string `json:"message"`

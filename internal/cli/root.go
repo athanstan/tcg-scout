@@ -17,6 +17,7 @@ import (
 	"tcg-scout/internal/api"
 	"tcg-scout/internal/app"
 	"tcg-scout/internal/scraper"
+	"tcg-scout/internal/tcg/sve/decks"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -152,6 +153,9 @@ func (c *commandSet) setDefaults() {
 	viper.SetDefault("webp-quality", request.WebPQuality)
 	viper.SetDefault("image-concurrency", request.ImageConcurrency)
 	viper.SetDefault("page-concurrency", request.PageConcurrency)
+	viper.SetDefault("tournament-url", "")
+	viper.SetDefault("output-dir", request.OutputDecksDir)
+	viper.SetDefault("deck-concurrency", request.DeckConcurrency)
 	viper.SetDefault("server-addr", ":8080")
 	viper.SetDefault("server-read-timeout", "5s")
 	viper.SetDefault("server-write-timeout", "30s")
@@ -425,35 +429,68 @@ func (c *commandSet) newScraperCommand(game app.GameDefinition, resource app.Res
 				}, action.ID)
 			},
 		}
-		addRequestFlags(actionCmd)
+		addRequestFlags(actionCmd, resource.ID)
 		cmd.AddCommand(actionCmd)
 	}
 
 	return cmd
 }
 
-func addRequestFlags(cmd *cobra.Command) {
-	cmd.Flags().String("search-url", scraper.DefaultSearchURL, "search results URL")
-	cmd.Flags().String("output-json", "output/cards.json", "cards JSON output path")
-	cmd.Flags().String("images-dir", "output/images", "WEBP image output directory")
+func addRequestFlags(cmd *cobra.Command, resourceID string) {
 	cmd.Flags().String("user-agent", "tcg-scout/1.0", "HTTP user agent")
-	cmd.Flags().String("allowed-domain", "", "optional allowed domain")
-	cmd.Flags().Float64("webp-quality", 100, "WEBP quality from 0 to 100")
-	cmd.Flags().Int("image-concurrency", 8, "maximum concurrent image downloads")
-	cmd.Flags().Int("page-concurrency", 4, "maximum concurrent paginated page fetches")
-
-	mustBindFlag("search-url", cmd.Flags().Lookup("search-url"))
-	mustBindFlag("output-json", cmd.Flags().Lookup("output-json"))
-	mustBindFlag("images-dir", cmd.Flags().Lookup("images-dir"))
 	mustBindFlag("user-agent", cmd.Flags().Lookup("user-agent"))
-	mustBindFlag("allowed-domain", cmd.Flags().Lookup("allowed-domain"))
-	mustBindFlag("webp-quality", cmd.Flags().Lookup("webp-quality"))
-	mustBindFlag("image-concurrency", cmd.Flags().Lookup("image-concurrency"))
-	mustBindFlag("page-concurrency", cmd.Flags().Lookup("page-concurrency"))
+
+	switch resourceID {
+	case "cards":
+		cmd.Flags().String("search-url", scraper.DefaultSearchURL, "search results URL")
+		cmd.Flags().String("output-json", "output/cards.json", "cards JSON output path")
+		cmd.Flags().String("images-dir", "output/images", "WEBP image output directory")
+		cmd.Flags().String("allowed-domain", "", "optional allowed domain")
+		cmd.Flags().Float64("webp-quality", 100, "WEBP quality from 0 to 100")
+		cmd.Flags().Int("image-concurrency", 8, "maximum concurrent image downloads")
+		cmd.Flags().Int("page-concurrency", 4, "maximum concurrent paginated page fetches")
+
+		mustBindFlag("search-url", cmd.Flags().Lookup("search-url"))
+		mustBindFlag("output-json", cmd.Flags().Lookup("output-json"))
+		mustBindFlag("images-dir", cmd.Flags().Lookup("images-dir"))
+		mustBindFlag("allowed-domain", cmd.Flags().Lookup("allowed-domain"))
+		mustBindFlag("webp-quality", cmd.Flags().Lookup("webp-quality"))
+		mustBindFlag("image-concurrency", cmd.Flags().Lookup("image-concurrency"))
+		mustBindFlag("page-concurrency", cmd.Flags().Lookup("page-concurrency"))
+	case "decks":
+		cmd.Flags().String("tournament-url", "", "official tournament deck list URL")
+		cmd.Flags().String("output-dir", decks.DefaultOutputDir, "deck JSON output directory")
+		cmd.Flags().Int("deck-concurrency", decks.DefaultDeckConcurrency, "maximum concurrent decklog fetches")
+
+		mustBindFlag("tournament-url", cmd.Flags().Lookup("tournament-url"))
+		mustBindFlag("output-dir", cmd.Flags().Lookup("output-dir"))
+		mustBindFlag("deck-concurrency", cmd.Flags().Lookup("deck-concurrency"))
+	}
 }
 
 func (c *commandSet) runAction(cmd *cobra.Command, selection app.Selection, action string) error {
-	result, err := c.service.Execute(cmd.Context(), selection, action, app.Request{
+	if err := viper.BindPFlags(cmd.Flags()); err != nil {
+		return fmt.Errorf("bind flags: %w", err)
+	}
+
+	result, err := c.service.Execute(cmd.Context(), selection, action, c.buildRequest())
+	if err != nil {
+		return err
+	}
+
+	switch action {
+	case app.ActionList:
+		if len(result.Tournament) > 0 {
+			return c.writeTournament(cmd, result.Tournament)
+		}
+		return c.writeCards(cmd, result.Cards)
+	default:
+		return c.writeSummary(cmd, result.Summary)
+	}
+}
+
+func (c *commandSet) buildRequest() app.Request {
+	return app.Request{
 		SearchURL:        viper.GetString("search-url"),
 		OutputJSONPath:   viper.GetString("output-json"),
 		ImagesDir:        viper.GetString("images-dir"),
@@ -462,16 +499,9 @@ func (c *commandSet) runAction(cmd *cobra.Command, selection app.Selection, acti
 		WebPQuality:      viper.GetFloat64("webp-quality"),
 		ImageConcurrency: viper.GetInt("image-concurrency"),
 		PageConcurrency:  viper.GetInt("page-concurrency"),
-	})
-	if err != nil {
-		return err
-	}
-
-	switch action {
-	case app.ActionList:
-		return c.writeCards(cmd, result.Cards)
-	default:
-		return c.writeSummary(cmd, result.Summary)
+		TournamentURL:    viper.GetString("tournament-url"),
+		OutputDecksDir:     viper.GetString("output-dir"),
+		DeckConcurrency:  viper.GetInt("deck-concurrency"),
 	}
 }
 
@@ -615,6 +645,20 @@ func (c *commandSet) writeScrapers(cmd *cobra.Command, gameID, resourceID string
 		}
 		return writer.Flush()
 	}
+}
+
+func (c *commandSet) writeTournament(cmd *cobra.Command, payload []byte) error {
+	format := c.resolveOutput(cmd, false)
+	if format != "json" {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "tournament data available with --output json")
+		return err
+	}
+
+	var value any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return err
+	}
+	return writeJSON(cmd.OutOrStdout(), value)
 }
 
 func (c *commandSet) writeCards(cmd *cobra.Command, cards []scraper.Card) error {
