@@ -69,6 +69,8 @@ type Summary struct {
 	Action         string `json:"action"`
 	CardCount      int    `json:"card_count,omitempty"`
 	DeckCount      int    `json:"deck_count,omitempty"`
+	DecksTotal     int    `json:"decks_total,omitempty"`
+	DecksFailed    int    `json:"decks_failed,omitempty"`
 	Format         string `json:"format,omitempty"`
 	OutputJSONPath string `json:"output_json_path,omitempty"`
 	ImagesDir      string `json:"images_dir,omitempty"`

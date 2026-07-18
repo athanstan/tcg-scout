@@ -93,6 +93,8 @@ func NewRootCommand(service *app.Service, streams Streams, buildInfo BuildInfo) 
 	return root
 }
 
+// RewriteArgs maps legacy shorthand invocations onto the explicit command tree.
+// Prefer the documented paths (for example, "sve decks official scrape") in scripts.
 func RewriteArgs(args []string) []string {
 	if len(args) == 0 {
 		return nil
@@ -115,6 +117,15 @@ func RewriteArgs(args []string) []string {
 			return append([]string{"sve", "cards", "official", app.ActionScrape}, args[2:]...)
 		}
 	}
+	if len(args) >= 3 && args[0] == "sve" && args[1] == "decks" {
+		switch args[2] {
+		case app.ActionScrape, app.ActionList:
+			return append([]string{"sve", "decks", "official"}, args[2:]...)
+		}
+		if strings.HasPrefix(args[2], "-") {
+			return append([]string{"sve", "decks", "official", app.ActionScrape}, args[2:]...)
+		}
+	}
 	return args
 }
 
@@ -126,19 +137,23 @@ func ExitCode(err error) int {
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()
 	}
-	message := err.Error()
-	if strings.Contains(message, "unknown command") ||
-		strings.Contains(message, "unknown flag") ||
-		strings.Contains(message, "accepts") ||
-		strings.Contains(message, "requires at") ||
-		strings.Contains(message, "required flag") ||
-		strings.Contains(message, "unknown game") ||
-		strings.Contains(message, "unknown resource") ||
-		strings.Contains(message, "unknown scraper") ||
-		strings.Contains(message, "unknown action") {
+	if isCobraUsageError(err) {
 		return 2
 	}
 	return 1
+}
+
+func isCobraUsageError(err error) bool {
+	if errors.Is(err, pflag.ErrHelp) {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "unknown command") ||
+		strings.Contains(message, "unknown flag") ||
+		strings.Contains(message, "unknown shorthand flag") ||
+		strings.Contains(message, "accepts") ||
+		strings.Contains(message, "requires at") ||
+		strings.Contains(message, "required flag")
 }
 
 func (c *commandSet) setDefaults() {
@@ -220,7 +235,7 @@ func (c *commandSet) newResourcesCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resources := c.service.Resources(args[0])
 			if resources == nil {
-				return fmt.Errorf("unknown game %q", args[0])
+				return usageErrorf("unknown game %q", args[0])
 			}
 			return c.writeResources(cmd, args[0], resources)
 		},
@@ -235,7 +250,7 @@ func (c *commandSet) newScrapersCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scrapers := c.service.Scrapers(args[0], args[1])
 			if scrapers == nil {
-				return fmt.Errorf("unknown resource %q for game %q", args[1], args[0])
+				return usageErrorf("unknown resource %q for game %q", args[1], args[0])
 			}
 			return c.writeScrapers(cmd, args[0], args[1], scrapers)
 		},
@@ -365,6 +380,7 @@ func (c *commandSet) newGameCommand(game app.GameDefinition) *cobra.Command {
 		Use:   game.ID,
 		Short: game.Name,
 		Long:  game.Summary,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.writeResources(cmd, game.ID, c.service.Resources(game.ID))
 		},
@@ -382,6 +398,7 @@ func (c *commandSet) newResourceCommand(game app.GameDefinition, resource app.Re
 		Use:   resource.ID,
 		Short: resource.Name,
 		Long:  resource.Summary,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(resource.Scrapers) == 1 {
 				return c.runAction(cmd, app.Selection{
@@ -393,6 +410,8 @@ func (c *commandSet) newResourceCommand(game app.GameDefinition, resource app.Re
 			return c.writeScrapers(cmd, game.ID, resource.ID, c.service.Scrapers(game.ID, resource.ID))
 		},
 	}
+
+	addRequestFlags(cmd, resource.ID)
 
 	for _, scraperDefinition := range resource.Scrapers {
 		cmd.AddCommand(c.newScraperCommand(game, resource, scraperDefinition))
@@ -406,6 +425,7 @@ func (c *commandSet) newScraperCommand(game app.GameDefinition, resource app.Res
 		Use:   scraperDefinition.ID,
 		Short: scraperDefinition.Name,
 		Long:  scraperDefinition.Summary,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runAction(cmd, app.Selection{
 				Game:     game.ID,
@@ -429,7 +449,6 @@ func (c *commandSet) newScraperCommand(game app.GameDefinition, resource app.Res
 				}, action.ID)
 			},
 		}
-		addRequestFlags(actionCmd, resource.ID)
 		cmd.AddCommand(actionCmd)
 	}
 
@@ -437,39 +456,44 @@ func (c *commandSet) newScraperCommand(game app.GameDefinition, resource app.Res
 }
 
 func addRequestFlags(cmd *cobra.Command, resourceID string) {
-	cmd.Flags().String("user-agent", "tcg-scout/1.0", "HTTP user agent")
-	mustBindFlag("user-agent", cmd.Flags().Lookup("user-agent"))
+	flags := cmd.PersistentFlags()
+	flags.String("user-agent", "tcg-scout/1.0", "HTTP user agent")
+	mustBindFlag("user-agent", flags.Lookup("user-agent"))
 
 	switch resourceID {
 	case "cards":
-		cmd.Flags().String("search-url", scraper.DefaultSearchURL, "search results URL")
-		cmd.Flags().String("output-json", "output/cards.json", "cards JSON output path")
-		cmd.Flags().String("images-dir", "output/images", "WEBP image output directory")
-		cmd.Flags().String("allowed-domain", "", "optional allowed domain")
-		cmd.Flags().Float64("webp-quality", 100, "WEBP quality from 0 to 100")
-		cmd.Flags().Int("image-concurrency", 8, "maximum concurrent image downloads")
-		cmd.Flags().Int("page-concurrency", 4, "maximum concurrent paginated page fetches")
+		flags.String("search-url", scraper.DefaultSearchURL, "search results URL")
+		flags.String("output-json", "output/cards.json", "cards JSON output path")
+		flags.String("images-dir", "output/images", "WEBP image output directory")
+		flags.String("allowed-domain", "", "optional allowed domain")
+		flags.Float64("webp-quality", 100, "WEBP quality from 0 to 100")
+		flags.Int("image-concurrency", 8, "maximum concurrent image downloads")
+		flags.Int("page-concurrency", 4, "maximum concurrent paginated page fetches")
 
-		mustBindFlag("search-url", cmd.Flags().Lookup("search-url"))
-		mustBindFlag("output-json", cmd.Flags().Lookup("output-json"))
-		mustBindFlag("images-dir", cmd.Flags().Lookup("images-dir"))
-		mustBindFlag("allowed-domain", cmd.Flags().Lookup("allowed-domain"))
-		mustBindFlag("webp-quality", cmd.Flags().Lookup("webp-quality"))
-		mustBindFlag("image-concurrency", cmd.Flags().Lookup("image-concurrency"))
-		mustBindFlag("page-concurrency", cmd.Flags().Lookup("page-concurrency"))
+		mustBindFlag("search-url", flags.Lookup("search-url"))
+		mustBindFlag("output-json", flags.Lookup("output-json"))
+		mustBindFlag("images-dir", flags.Lookup("images-dir"))
+		mustBindFlag("allowed-domain", flags.Lookup("allowed-domain"))
+		mustBindFlag("webp-quality", flags.Lookup("webp-quality"))
+		mustBindFlag("image-concurrency", flags.Lookup("image-concurrency"))
+		mustBindFlag("page-concurrency", flags.Lookup("page-concurrency"))
 	case "decks":
-		cmd.Flags().String("tournament-url", "", "official tournament deck list URL")
-		cmd.Flags().String("output-dir", decks.DefaultOutputDir, "deck JSON output directory")
-		cmd.Flags().Int("deck-concurrency", decks.DefaultDeckConcurrency, "maximum concurrent decklog fetches")
+		flags.String("tournament-url", "", "official tournament deck list URL")
+		flags.String("output-dir", decks.DefaultOutputDir, "deck JSON output directory")
+		flags.Int("deck-concurrency", decks.DefaultDeckConcurrency, "maximum concurrent decklog fetches")
 
-		mustBindFlag("tournament-url", cmd.Flags().Lookup("tournament-url"))
-		mustBindFlag("output-dir", cmd.Flags().Lookup("output-dir"))
-		mustBindFlag("deck-concurrency", cmd.Flags().Lookup("deck-concurrency"))
+		mustBindFlag("tournament-url", flags.Lookup("tournament-url"))
+		mustBindFlag("output-dir", flags.Lookup("output-dir"))
+		mustBindFlag("deck-concurrency", flags.Lookup("deck-concurrency"))
+
+		if err := cmd.MarkPersistentFlagRequired("tournament-url"); err != nil {
+			panic(err)
+		}
 	}
 }
 
 func (c *commandSet) runAction(cmd *cobra.Command, selection app.Selection, action string) error {
-	if err := viper.BindPFlags(cmd.Flags()); err != nil {
+	if err := bindCommandFlags(cmd); err != nil {
 		return fmt.Errorf("bind flags: %w", err)
 	}
 
@@ -537,6 +561,14 @@ func (c *commandSet) runInteractive(cmd *cobra.Command) error {
 		return err
 	}
 
+	if resource.ID == "decks" {
+		tournamentURL, err := promptRequiredString(reader, cmd.OutOrStdout(), "Enter tournament deck list URL")
+		if err != nil {
+			return err
+		}
+		viper.Set("tournament-url", tournamentURL)
+	}
+
 	return c.runAction(cmd, app.Selection{
 		Game:     game.ID,
 		Resource: resource.ID,
@@ -563,10 +595,28 @@ func promptChoice(reader *bufio.Reader, out io.Writer, label string, options []o
 	}
 	choice, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || choice < 1 || choice > len(options) {
-		return 0, fmt.Errorf("invalid choice %q", strings.TrimSpace(line))
+		return 0, usageErrorf("invalid choice %q", strings.TrimSpace(line))
 	}
 
 	return choice - 1, nil
+}
+
+func promptRequiredString(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+	if _, err := fmt.Fprintf(out, "%s:\n> ", label); err != nil {
+		return "", err
+	}
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
+	value := strings.TrimSpace(line)
+	if value == "" {
+		return "", usageErrorf("tournament url is required")
+	}
+
+	return value, nil
 }
 
 func (c *commandSet) writeGames(cmd *cobra.Command, games []app.GameDefinition) error {
@@ -744,6 +794,18 @@ func mustBindFlag(key string, flag *pflag.Flag) {
 	if err := viper.BindPFlag(key, flag); err != nil {
 		panic(err)
 	}
+}
+
+func bindCommandFlags(cmd *cobra.Command) error {
+	for _, flags := range []*pflag.FlagSet{cmd.InheritedFlags(), cmd.PersistentFlags(), cmd.Flags()} {
+		if flags == nil {
+			continue
+		}
+		if err := viper.BindPFlags(flags); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type option struct {

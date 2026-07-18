@@ -64,8 +64,20 @@ func parseTournamentMeta(pageURL string, doc *goquery.Document) (TournamentMeta,
 		return TournamentMeta{}, fmt.Errorf("could not derive tournament slug from %q", pageURL)
 	}
 
-	title := strings.TrimSpace(doc.Find("title").First().Text())
-	title = strings.TrimSuffix(title, " | DECKS | Shadowverse: Evolve")
+	title := strings.TrimSpace(doc.Find(".detail-Ttl").First().Text())
+	if title == "" {
+		title = strings.TrimSpace(doc.Find("title").First().Text())
+		title = strings.TrimSuffix(title, " | DECKS | Shadowverse: Evolve")
+	}
+
+	date := strings.TrimSpace(doc.Find(".date-Category .date").First().Text())
+
+	link := pageURL
+	if canonical, ok := doc.Find(`link[rel="canonical"]`).Attr("href"); ok {
+		if trimmed := strings.TrimSpace(canonical); trimmed != "" {
+			link = trimmed
+		}
+	}
 
 	location := ""
 	doc.Find("h1").EachWithBreak(func(_ int, sel *goquery.Selection) bool {
@@ -83,8 +95,9 @@ func parseTournamentMeta(pageURL string, doc *goquery.Document) (TournamentMeta,
 	return TournamentMeta{
 		Slug:      slug,
 		Name:      title,
+		Date:      date,
 		Location:  location,
-		SourceURL: pageURL,
+		SourceURL: link,
 	}, nil
 }
 
@@ -100,7 +113,7 @@ func parseSoloTable(doc *goquery.Document) ([]SoloEntry, error) {
 		rankLabel := strings.TrimSpace(row.Find(".rank-cell").First().Text())
 		wins := parseInt(row.Find(".win-ratio").First().Text())
 		entries = append(entries, SoloEntry{
-			Rank:          parseRankOrdinal(rankLabel),
+			Ranking:       parseRankOrdinal(rankLabel),
 			RankLabel:     rankLabel,
 			Player:        strings.TrimSpace(row.Find(".player-name").First().Text()),
 			Craft:         strings.TrimSpace(row.Find(".nation-name").First().Text()),

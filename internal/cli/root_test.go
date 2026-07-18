@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,6 +14,28 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+func TestExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "nil", err: nil, want: 0},
+		{name: "usage error", err: usageErrorf("unknown game %q", "missing"), want: 2},
+		{name: "runtime error", err: errors.New("fetch failed"), want: 1},
+		{name: "cobra unknown command", err: errors.New(`unknown command "foo" for "tcg-scout"`), want: 2},
+		{name: "cobra required flag", err: errors.New(`required flag(s) "tournament-url" not set`), want: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExitCode(tt.err); got != tt.want {
+				t.Fatalf("ExitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
 
 type fakeRunner struct{}
 
@@ -51,6 +75,42 @@ func (fakeRunner) Execute(_ context.Context, action string, _ app.Request) (app.
 	return result, nil
 }
 
+type fakeDecksRunner struct{}
+
+func (fakeDecksRunner) Definition() app.RunnerDefinition {
+	return app.RunnerDefinition{
+		GameID:          "demo",
+		GameName:        "Demo Game",
+		GameSummary:     "Demo summary",
+		ResourceID:      "decks",
+		ResourceName:    "Decks",
+		ResourceSummary: "Deck workflows",
+		ScraperID:       "official",
+		ScraperName:     "Official site",
+		ScraperSummary:  "Official deck scraper",
+		DefaultAction:   app.ActionScrape,
+		Actions: []app.ActionDefinition{
+			{ID: app.ActionScrape, Summary: "Scrape decks"},
+			{ID: app.ActionList, Summary: "List decks"},
+		},
+	}
+}
+
+func (fakeDecksRunner) Execute(_ context.Context, action string, req app.Request) (app.Result, error) {
+	if strings.TrimSpace(req.TournamentURL) == "" {
+		return app.Result{}, fmt.Errorf("tournament url is required")
+	}
+	return app.Result{
+		Summary: app.Summary{
+			Game:     "demo",
+			Resource: "decks",
+			Scraper:  "official",
+			Action:   action,
+			Message:  "deck done for " + req.TournamentURL,
+		},
+	}, nil
+}
+
 func TestRewriteArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -77,6 +137,16 @@ func TestRewriteArgs(t *testing.T) {
 			args: []string{"sve", "cards", "scrape", "--output", "json"},
 			want: []string{"sve", "cards", "official", "scrape", "--output", "json"},
 		},
+		{
+			name: "decks scrape shorthand",
+			args: []string{"sve", "decks", "scrape", "--tournament-url", "https://example.com/decks/test/"},
+			want: []string{"sve", "decks", "official", "scrape", "--tournament-url", "https://example.com/decks/test/"},
+		},
+		{
+			name: "decks flags only",
+			args: []string{"sve", "decks", "--tournament-url", "https://example.com/decks/test/"},
+			want: []string{"sve", "decks", "official", "scrape", "--tournament-url", "https://example.com/decks/test/"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -96,6 +166,7 @@ func TestRootCommand(t *testing.T) {
 		args            []string
 		wantContains    []string
 		wantErrContains string
+		wantExitCode    int
 	}{
 		{
 			name:         "games json",
@@ -124,20 +195,46 @@ func TestRootCommand(t *testing.T) {
 			wantContains: []string{"Choose a game", "C-001\tAlpha Card"},
 		},
 		{
+			name:         "interactive decks prompts for tournament url",
+			input:        "1\n2\n1\n1\nhttps://example.com/decks/test/\n",
+			args:         []string{"interactive", "--output", "plain"},
+			wantContains: []string{"Enter tournament deck list URL", "deck done for https://example.com/decks/test/"},
+		},
+		{
+			name:         "scraper level inherits resource flags",
+			args:         []string{"demo", "cards", "alpha", "list", "--search-url", "https://example.com/cards", "--output", "json"},
+			wantContains: []string{`"Alpha Card"`},
+		},
+		{
+			name:            "rejects unknown positional arg on resource",
+			args:            []string{"demo", "decks", "foo"},
+			wantErrContains: `unknown command "foo" for "tcg-scout demo decks"`,
+			wantExitCode:    2,
+		},
+		{
+			name:            "requires tournament url for deck scrape",
+			args:            []string{"demo", "decks"},
+			wantErrContains: `required flag(s) "tournament-url" not set`,
+			wantExitCode:    2,
+		},
+		{
 			name:            "invalid interactive choice",
 			input:           "9\n",
 			args:            []string{"interactive", "--output", "plain"},
 			wantErrContains: `invalid choice "9"`,
+			wantExitCode:    2,
 		},
 		{
 			name:            "unknown resource",
 			args:            []string{"resources", "missing"},
 			wantErrContains: `unknown game "missing"`,
+			wantExitCode:    2,
 		},
 		{
 			name:            "usage errors map to exit code two",
 			args:            []string{"unknown"},
 			wantErrContains: `unknown command "unknown"`,
+			wantExitCode:    2,
 		},
 	}
 
@@ -151,8 +248,8 @@ func TestRootCommand(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErrContains) {
 					t.Fatalf("Execute() error = %v, want substring %q", err, tt.wantErrContains)
 				}
-				if tt.name == "usage errors map to exit code two" && ExitCode(err) != 2 {
-					t.Fatalf("ExitCode() = %d, want 2", ExitCode(err))
+				if tt.wantExitCode != 0 && ExitCode(err) != tt.wantExitCode {
+					t.Fatalf("ExitCode() = %d, want %d", ExitCode(err), tt.wantExitCode)
 				}
 				return
 			}
@@ -174,7 +271,7 @@ func newTestRoot(t *testing.T, input string) (*cobra.Command, *bytes.Buffer, *by
 	t.Helper()
 
 	viper.Reset()
-	service, err := app.NewService(fakeRunner{})
+	service, err := app.NewService(fakeRunner{}, fakeDecksRunner{})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

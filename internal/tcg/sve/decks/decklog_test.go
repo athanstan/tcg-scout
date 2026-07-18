@@ -78,7 +78,39 @@ func TestDecklogClientFetchDecks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchDecks() error = %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("len(results) = %d, want 2", len(results))
+	if len(results.Decks) != 2 {
+		t.Fatalf("len(results.Decks) = %d, want 2", len(results.Decks))
+	}
+}
+
+func TestDecklogClientFetchDecksPartialFailure(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deckID := r.URL.Path[len("/system/app/api/view/"):]
+		if deckID == "BAD" {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deck_id":"` + deckID + `","list":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewDecklogClient(Config{
+		UserAgent:      "tcg-scout-test",
+		HTTPClient:     server.Client(),
+		DecklogAPIBase: server.URL + "/system/app/api/view/",
+	})
+
+	results, err := client.FetchDecks(context.Background(), []string{"GOOD", "BAD"}, 2)
+	if err != nil {
+		t.Fatalf("FetchDecks() error = %v", err)
+	}
+	if len(results.Decks) != 1 {
+		t.Fatalf("len(results.Decks) = %d, want 1", len(results.Decks))
+	}
+	if len(results.Failures) != 1 || results.Failures[0].DeckID != "BAD" {
+		t.Fatalf("Failures = %#v", results.Failures)
 	}
 }

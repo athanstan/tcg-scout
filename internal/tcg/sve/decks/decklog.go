@@ -80,12 +80,19 @@ func (c *DecklogClient) FetchDeck(ctx context.Context, deckID string) (json.RawM
 	return json.RawMessage(trimmed), nil
 }
 
-func (c *DecklogClient) FetchDecks(ctx context.Context, deckIDs []string, concurrency int) (map[string]json.RawMessage, error) {
+type DeckFetchBatch struct {
+	Decks    map[string]json.RawMessage
+	Failures []DeckFetchFailure
+}
+
+func (c *DecklogClient) FetchDecks(ctx context.Context, deckIDs []string, concurrency int) (DeckFetchBatch, error) {
 	if concurrency <= 0 {
 		concurrency = DefaultDeckConcurrency
 	}
 
-	results := make(map[string]json.RawMessage, len(deckIDs))
+	batch := DeckFetchBatch{
+		Decks: make(map[string]json.RawMessage, len(deckIDs)),
+	}
 	var mu sync.Mutex
 
 	group, ctx := errgroup.WithContext(ctx)
@@ -100,20 +107,31 @@ func (c *DecklogClient) FetchDecks(ctx context.Context, deckIDs []string, concur
 
 			deck, err := c.FetchDeck(ctx, deckID)
 			if err != nil {
-				return err
+				mu.Lock()
+				batch.Failures = append(batch.Failures, DeckFetchFailure{
+					DeckID: deckID,
+					Reason: deckFetchReason(deckID, err),
+				})
+				mu.Unlock()
+				return nil
 			}
 
 			mu.Lock()
-			results[deckID] = deck
+			batch.Decks[deckID] = deck
 			mu.Unlock()
 			return nil
 		})
 	}
 
 	if err := group.Wait(); err != nil {
-		return nil, err
+		return DeckFetchBatch{}, err
 	}
-	return results, nil
+	return batch, nil
+}
+
+func deckFetchReason(deckID string, err error) string {
+	prefix := "deck " + deckID + ": "
+	return strings.TrimPrefix(err.Error(), prefix)
 }
 
 func httpClientFor(cfg Config) *http.Client {

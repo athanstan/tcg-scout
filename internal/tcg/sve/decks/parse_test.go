@@ -24,6 +24,12 @@ func TestParseSoloTournamentPage(t *testing.T) {
 	if page.Meta.Slug != "bcs2526-sydney" {
 		t.Fatalf("Slug = %q", page.Meta.Slug)
 	}
+	if page.Meta.Name != "Bushiroad Championship Series 25/26 Event Report—Sydney, Australia" {
+		t.Fatalf("Name = %q", page.Meta.Name)
+	}
+	if page.Meta.Date != "Apr. 6, 2026" {
+		t.Fatalf("Date = %q", page.Meta.Date)
+	}
 	if page.Meta.Location != "Sydney, Australia" {
 		t.Fatalf("Location = %q", page.Meta.Location)
 	}
@@ -54,6 +60,9 @@ func TestParseTeamTournamentPage(t *testing.T) {
 	}
 	if page.Meta.TeamCount != 8 {
 		t.Fatalf("TeamCount = %d, want 8", page.Meta.TeamCount)
+	}
+	if page.Meta.Date != "Jul. 6, 2026" {
+		t.Fatalf("Date = %q", page.Meta.Date)
 	}
 
 	deckCount := 0

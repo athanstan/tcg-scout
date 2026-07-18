@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,12 +54,21 @@ func buildTournamentPayload(ctx context.Context, cfg Config) (json.RawMessage, R
 	}
 
 	client := NewDecklogClient(cfg)
-	decksByID, err := client.FetchDecks(ctx, deckIDs, cfg.DeckConcurrency)
+	batch, err := client.FetchDecks(ctx, deckIDs, cfg.DeckConcurrency)
 	if err != nil {
 		return nil, RunSummary{}, err
 	}
 
+	failures := append([]DeckFetchFailure(nil), batch.Failures...)
+	scraped := len(batch.Decks)
+	for _, failure := range failures {
+		slog.Warn("deck fetch failed", "deck_id", failure.DeckID, "reason", failure.Reason)
+	}
+
 	page.Meta.CrawledAt = time.Now().UTC()
+	page.Meta.DecksTotal = len(deckIDs)
+	page.Meta.DecksScraped = scraped
+	page.Meta.DecksFailed = len(failures)
 
 	outputPath, err := outputPathFor(cfg, page.Meta.Slug)
 	if err != nil {
@@ -68,26 +78,60 @@ func buildTournamentPayload(ctx context.Context, cfg Config) (json.RawMessage, R
 	var payload json.RawMessage
 	switch page.Format {
 	case FormatSolo:
-		file := SoloTournamentFile{Tournament: page.Meta, Entries: page.Solo}
-		for i := range file.Entries {
-			deck, ok := decksByID[file.Entries[i].DeckID]
+		entries := append([]SoloEntry(nil), page.Solo...)
+		for i := range entries {
+			entries[i].TournamentParticipants = page.Meta.EntryCount
+			deckID := entries[i].DeckID
+			raw, ok := batch.Decks[deckID]
 			if !ok {
-				return nil, RunSummary{}, fmt.Errorf("missing deck payload for %s", file.Entries[i].DeckID)
+				entries[i].DeckFetchError = failureReason(failures, deckID)
+				continue
 			}
-			file.Entries[i].Deck = deck
+			deck, err := NormalizeDeck(raw)
+			if err != nil {
+				reason := fmt.Sprintf("normalize deck: %v", err)
+				slog.Warn("deck normalize failed", "deck_id", deckID, "reason", reason)
+				entries[i].DeckFetchError = reason
+				failures = appendFailure(failures, deckID, reason)
+				scraped--
+				page.Meta.DecksScraped = scraped
+				page.Meta.DecksFailed = len(failures)
+				continue
+			}
+			entries[i].Deck = deck
+		}
+		file, buildErr := buildTournamentFile(page.Meta, entries, failures)
+		if buildErr != nil {
+			return nil, RunSummary{}, buildErr
 		}
 		payload, err = marshalPayload(file)
 	case FormatTeam:
-		file := TeamTournamentFile{Tournament: page.Meta, Teams: page.Teams}
-		for i := range file.Teams {
-			for j := range file.Teams[i].Decks {
-				deckID := file.Teams[i].Decks[j].DeckID
-				deck, ok := decksByID[deckID]
+		teams := append([]Team(nil), page.Teams...)
+		for i := range teams {
+			for j := range teams[i].Decks {
+				deckID := teams[i].Decks[j].DeckID
+				raw, ok := batch.Decks[deckID]
 				if !ok {
-					return nil, RunSummary{}, fmt.Errorf("missing deck payload for %s", deckID)
+					teams[i].Decks[j].DeckFetchError = failureReason(failures, deckID)
+					continue
 				}
-				file.Teams[i].Decks[j].Deck = deck
+				deck, err := NormalizeDeck(raw)
+				if err != nil {
+					reason := fmt.Sprintf("normalize deck: %v", err)
+					slog.Warn("deck normalize failed", "deck_id", deckID, "reason", reason)
+					teams[i].Decks[j].DeckFetchError = reason
+					failures = appendFailure(failures, deckID, reason)
+					scraped--
+					page.Meta.DecksScraped = scraped
+					page.Meta.DecksFailed = len(failures)
+					continue
+				}
+				teams[i].Decks[j].Deck = deck
 			}
+		}
+		file, buildErr := buildTournamentFile(page.Meta, teams, failures)
+		if buildErr != nil {
+			return nil, RunSummary{}, buildErr
 		}
 		payload, err = marshalPayload(file)
 	default:
@@ -97,13 +141,66 @@ func buildTournamentPayload(ctx context.Context, cfg Config) (json.RawMessage, R
 		return nil, RunSummary{}, err
 	}
 
+	if scraped == 0 {
+		return nil, RunSummary{}, fmt.Errorf("no decks scraped (%d failed)", len(failures))
+	}
+
 	summary := RunSummary{
 		Slug:           page.Meta.Slug,
 		Format:         page.Format,
-		DeckCount:      len(deckIDs),
+		DecksTotal:     len(deckIDs),
+		DecksScraped:   scraped,
+		DecksFailed:    len(failures),
 		OutputJSONPath: outputPath,
 	}
 	return payload, summary, nil
+}
+
+func appendFailure(failures []DeckFetchFailure, deckID, reason string) []DeckFetchFailure {
+	for _, failure := range failures {
+		if failure.DeckID == deckID {
+			return failures
+		}
+	}
+	return append(failures, DeckFetchFailure{DeckID: deckID, Reason: reason})
+}
+
+func buildTournamentFile(meta TournamentMeta, decks any, failures []DeckFetchFailure) (TournamentFile, error) {
+	deckData, err := json.Marshal(decks)
+	if err != nil {
+		return TournamentFile{}, fmt.Errorf("marshal decks: %w", err)
+	}
+
+	file := TournamentFile{
+		Title:      meta.Name,
+		Link:       meta.SourceURL,
+		Date:       meta.Date,
+		Identifier: meta.Slug,
+		Tournament: TournamentInfo{
+			Format:       meta.Format,
+			Location:     meta.Location,
+			EntryCount:   meta.EntryCount,
+			TeamCount:    meta.TeamCount,
+			DecksTotal:   meta.DecksTotal,
+			DecksScraped: meta.DecksScraped,
+			DecksFailed:  meta.DecksFailed,
+			CrawledAt:    meta.CrawledAt,
+		},
+		Decks: deckData,
+	}
+	if len(failures) > 0 {
+		file.FailedDecks = failures
+	}
+	return file, nil
+}
+
+func failureReason(failures []DeckFetchFailure, deckID string) string {
+	for _, failure := range failures {
+		if failure.DeckID == deckID {
+			return failure.Reason
+		}
+	}
+	return "deck payload unavailable"
 }
 
 func fetchTournamentPage(ctx context.Context, cfg Config) ([]byte, error) {
@@ -158,21 +255,7 @@ func writeTournamentJSON(path string, payload json.RawMessage) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-
-	var value any
-	if err := json.Unmarshal(payload, &value); err != nil {
-		return fmt.Errorf("decode tournament payload: %w", err)
-	}
-	if err := encoder.Encode(value); err != nil {
+	if err := os.WriteFile(path, append(payload, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write tournament json: %w", err)
 	}
 	return nil

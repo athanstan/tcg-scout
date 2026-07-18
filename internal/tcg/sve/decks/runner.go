@@ -48,10 +48,12 @@ func (r Runner) Execute(ctx context.Context, action string, req app.Request) (ap
 		}
 		return app.Result{
 			Summary: app.Summary{
-				DeckCount:      summary.DeckCount,
+				DeckCount:      summary.DecksScraped,
+				DecksTotal:     summary.DecksTotal,
+				DecksFailed:    summary.DecksFailed,
 				OutputJSONPath: summary.OutputJSONPath,
 				Format:         summary.Format,
-				Message:        fmt.Sprintf("scraped %d decks for %s (%s)", summary.DeckCount, summary.Slug, summary.Format),
+				Message:        formatDeckSummary("scraped", summary),
 			},
 		}, nil
 	case app.ActionList:
@@ -62,12 +64,22 @@ func (r Runner) Execute(ctx context.Context, action string, req app.Request) (ap
 		return app.Result{
 			Tournament: payload,
 			Summary: app.Summary{
-				DeckCount: summary.DeckCount,
-				Format:    summary.Format,
-				Message:   fmt.Sprintf("listed %d decks for %s (%s)", summary.DeckCount, summary.Slug, summary.Format),
+				DeckCount:   summary.DecksScraped,
+				DecksTotal:  summary.DecksTotal,
+				DecksFailed: summary.DecksFailed,
+				Format:      summary.Format,
+				Message:     formatDeckSummary("listed", summary),
 			},
 		}, nil
 	default:
 		return app.Result{}, fmt.Errorf("unsupported action %q", action)
 	}
+}
+
+func formatDeckSummary(verb string, summary RunSummary) string {
+	message := fmt.Sprintf("%s %d/%d decks for %s (%s)", verb, summary.DecksScraped, summary.DecksTotal, summary.Slug, summary.Format)
+	if summary.DecksFailed > 0 {
+		message += fmt.Sprintf("; %d failed", summary.DecksFailed)
+	}
+	return message
 }

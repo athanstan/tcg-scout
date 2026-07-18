@@ -2,351 +2,296 @@
 
 # tcg-scout
 
-`tcg-scout` is a production-oriented Go tool for **multi-game TCG scraping**. It now uses a **hexagonal-lite** layout with:
+Go CLI and HTTP API for multi-game TCG scraping. One registry drives discovery, execution, and output across adapters.
 
-- a shared application registry for **games**, **resources**, **scrapers**, and **actions**
-- a Cobra + Viper CLI for interactive and automated workflows
-- an HTTP API that exposes the same discovery and execution surface as the CLI
+| Layer | Path |
+| --- | --- |
+| Entry | `cmd/tcg-scout` |
+| Registry | `internal/app` |
+| CLI | `internal/cli` |
+| API | `internal/api` |
+| SVE cards | `internal/tcg/sve/cards` |
+| SVE decks | `internal/tcg/sve/decks` |
 
-Today the project ships with:
-
-- `sve` game: **Shadowverse Evolve**
-- `cards` resource with `official` scraper (`scrape`, `list`, `images`)
-- `decks` resource with `official` scraper (`scrape`, `list`)
-
-The structure is ready to grow into more games and more scraper adapters.
-
-## Architecture
-
-```text
-cmd/tcg-scout               # main entrypoint
-internal/app                # shared registry + execution service
-internal/cli                # Cobra/Viper CLI adapter
-internal/api                # HTTP API adapter
-internal/tcg/sve/cards      # Shadowverse Evolve cards runner
-internal/tcg/sve/decks      # Shadowverse Evolve tournament decks runner
-internal/scraper            # card scraping engine
-```
-
-The shared service is the contract between adapters and scraper implementations:
-
-- the **CLI** discovers and runs scrapers through it
-- the **API** exposes the same capabilities through HTTP
-- each scraper registers metadata once and becomes available everywhere
-
-## Requirements
-
-- Go `1.24+`
+**Requires:** Go 1.24+
 
 ## Quick start
 
-1. Install dependencies:
+```bash
+go mod tidy
+go run ./cmd/tcg-scout                    # interactive (TTY)
+go run ./cmd/tcg-scout games              # list games
+make build                                # bin/tcg-scout with version info
+```
 
-   ```bash
-   go mod tidy
-   ```
+## CLI
 
-2. Run the interactive CLI:
+### Command shape
 
-   ```bash
-   go run ./cmd/tcg-scout
-   ```
+```text
+tcg-scout <game> <resource> [official] <action> [flags]
+```
 
-3. Or run a command directly:
+When a resource has one scraper (`official`), both scraper and default action are optional.
 
-   ```bash
-   go run ./cmd/tcg-scout sve cards
-   go run ./cmd/tcg-scout sve decks --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
-   ```
+| Global flag | Default | Purpose |
+| --- | --- | --- |
+| `--output` | `auto` | `auto`, `table`, `plain`, `json` |
+| `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
+| `--config` | — | Path to `.tcg-scout.yaml` |
 
-## CLI usage
+### Discovery
 
-### Interactive mode
+| Command | Example |
+| --- | --- |
+| Games | `tcg-scout games` |
+| Resources | `tcg-scout resources sve` |
+| Scrapers | `tcg-scout scrapers sve cards` |
 
-Running the binary with no arguments opens a guided prompt when attached to a terminal:
+```bash
+go run ./cmd/tcg-scout games --output json
+```
+
+```json
+{
+  "games": [
+    { "id": "sve", "name": "Shadowverse Evolve", "summary": "..." }
+  ]
+}
+```
+
+### Interactive
 
 ```bash
 go run ./cmd/tcg-scout
-```
-
-You can also start it explicitly:
-
-```bash
 go run ./cmd/tcg-scout interactive
 ```
 
-### Discovery commands
+Deck scrapes prompt for a tournament URL when needed.
 
-List games:
+---
 
-```bash
-go run ./cmd/tcg-scout games
-```
+## Games
 
-List resources for a game:
+### Shadowverse Evolve (`sve`)
 
-```bash
-go run ./cmd/tcg-scout resources sve
-```
+English Shadowverse Evolve workflows via the official site and Decklog.
 
-List scrapers for a resource:
+#### Cards
 
-```bash
-go run ./cmd/tcg-scout scrapers sve cards
-go run ./cmd/tcg-scout scrapers sve decks
-```
+Scrape card metadata and WEBP art from the official search pages.
 
-### SVE cards
-
-Scrape cards and refresh `cards.json` plus WEBP art:
+| Action | Command | Writes files |
+| --- | --- | --- |
+| `scrape` (default) | `tcg-scout sve cards` | `output/cards.json`, `output/images/` |
+| `list` | `tcg-scout sve cards list` | No |
+| `images` | `tcg-scout sve cards images` | Rebuilds images from existing JSON |
 
 ```bash
-go run ./cmd/tcg-scout sve cards
+go run ./cmd/tcg-scout sve cards list --output plain
 ```
 
-List cards without writing files:
-
-```bash
-go run ./cmd/tcg-scout sve cards list
+```text
+C-001   Arisa
+C-002   Erika
 ```
 
-Rebuild images from an existing JSON file:
-
-```bash
-go run ./cmd/tcg-scout sve cards images
-```
-
-When a resource has only one scraper, `official` and the default action are optional. These are equivalent:
-
-```bash
-go run ./cmd/tcg-scout sve cards
-go run ./cmd/tcg-scout sve cards official scrape
-```
-
-#### Card scraper flags
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--search-url` | BP search URL | Card search page |
+| `--output-json` | `output/cards.json` | Cards JSON path |
+| `--images-dir` | `output/images` | WEBP output dir |
+| `--user-agent` | `tcg-scout/1.0` | HTTP user agent |
+| `--webp-quality` | `100` | WEBP quality (0–100) |
+| `--image-concurrency` | `8` | Concurrent image downloads |
+| `--page-concurrency` | `4` | Concurrent page fetches |
+| `--allowed-domain` | — | Optional domain allowlist |
 
 ```bash
 go run ./cmd/tcg-scout sve cards scrape \
   --search-url "https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17" \
-  --output-json output/cards.json \
-  --images-dir output/images \
-  --user-agent "tcg-scout/1.0" \
-  --webp-quality 90 \
-  --image-concurrency 8 \
-  --page-concurrency 4
+  --webp-quality 90
 ```
 
-| Flag | Purpose |
-| --- | --- |
-| `--search-url` | Override the upstream card search URL |
-| `--output-json` | Change where card JSON is written |
-| `--images-dir` | Change where WEBP images are written |
-| `--user-agent` | Override the HTTP user agent |
-| `--allowed-domain` | Restrict scraper requests to one domain |
-| `--webp-quality` | Set WEBP quality from `0` to `100` |
-| `--image-concurrency` | Control concurrent image downloads |
-| `--page-concurrency` | Control concurrent paginated fetches |
+Scrape summary (`--output json`):
 
-### SVE decks
+```json
+{
+  "game": "sve",
+  "resource": "cards",
+  "action": "scrape",
+  "card_count": 248,
+  "message": "scraped 248 cards"
+}
+```
 
-Crawl official tournament deck lists from Shadowverse Evolve event report pages. The crawler reads `data-deck-id` values from the HTML (no iframe scraping), then fetches full deck payloads from the [Decklog API](https://decklog-en.bushiroad.com/).
+#### Decks
 
-Scrape a tournament and write `{slug}-decks.json`:
+Crawl tournament deck lists from event report pages. Deck IDs come from `data-deck-id` in the HTML; payloads are fetched from [Decklog](https://decklog-en.bushiroad.com/).
+
+| Action | Command | Writes files |
+| --- | --- | --- |
+| `scrape` (default) | `tcg-scout sve decks --tournament-url URL` | `output/decks/{slug}-decks.json` |
+| `list` | `tcg-scout sve decks list --tournament-url URL` | No |
 
 ```bash
 go run ./cmd/tcg-scout sve decks \
   --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
 ```
 
-List tournament decks without writing files:
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--tournament-url` | — | Tournament page URL (**required**) |
+| `--output-dir` | `output/decks` | JSON output directory |
+| `--deck-concurrency` | `4` | Concurrent Decklog fetches |
+| `--user-agent` | `tcg-scout/1.0` | HTTP user agent |
 
-```bash
-go run ./cmd/tcg-scout sve decks list \
-  --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/" \
-  --output json
+Partial success is allowed — failed decks are logged, included in output, and the run continues:
+
+```text
+scraped 10/12 decks for bcs2526-spain (solo); 2 failed
 ```
 
-When a resource has only one scraper, `official` and the default action are optional. These are equivalent:
-
-```bash
-go run ./cmd/tcg-scout sve decks --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
-go run ./cmd/tcg-scout sve decks official scrape --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
-```
-
-Supported page formats:
-
-- **Solo** tournaments (e.g. BCS regional events) — one deck per player row
-- **Team** tournaments (e.g. BSF team events) — team blocks from `#team-table` only; Cross Craft sections are excluded
-
-Output is written to `output/decks/{slug}-decks.json` by default, where `slug` is taken from the tournament URL path (e.g. `bcs2526-sydney-decks.json`).
-
-#### Deck scraper flags
-
-```bash
-go run ./cmd/tcg-scout sve decks scrape \
-  --tournament-url "https://en.shadowverse-evolve.com/decks/bsf2026-philippines/" \
-  --output-dir output/decks \
-  --deck-concurrency 4 \
-  --user-agent "tcg-scout/1.0"
-```
-
-| Flag | Purpose |
-| --- | --- |
-| `--tournament-url` | Official tournament deck list URL (**required**) |
-| `--output-dir` | Directory for `{slug}-decks.json` output (default: `output/decks`) |
-| `--deck-concurrency` | Control concurrent Decklog API fetches |
-| `--user-agent` | Override the HTTP user agent |
-
-#### Win semantics in output JSON
-
-- **Solo entries** use `win_scope: "player"` — `wins` is the number of games that deck won (e.g. `"1st place · 7 wins"`)
-- **Team entries** use `win_scope: "team"` — `team_wins` is the number of team rounds won, shared across all decks on that team (e.g. `"1st place team · 4 team wins"`)
-
-### Output formats
-
-The CLI supports `auto`, `table`, `plain`, and `json` output:
-
-```bash
-go run ./cmd/tcg-scout games --output json
-go run ./cmd/tcg-scout sve cards list --output table
-go run ./cmd/tcg-scout sve decks list --tournament-url "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/" --output json
-```
-
-`auto` is the default:
-
-- terminal output -> table
-- non-terminal output -> plain
-
-## Compatibility aliases
-
-Legacy entrypoints are still supported:
-
-```bash
-go run ./cmd/tcg-scout -names-only
-go run ./cmd/tcg-scout images-only
-go run ./cmd/tcg-scout -search-url "https://example.com"
-go run ./cmd/tcg-scout sve cards scrape
-```
-
-They are internally rewritten to the new command tree:
-
-- `-names-only` -> `sve cards official list`
-- `images-only` -> `sve cards official images`
-- legacy flag-only scrape -> `sve cards official scrape`
-- `sve cards scrape` -> `sve cards official scrape`
-
-## Configuration
-
-Configuration is layered in this order:
-
-1. CLI flags
-2. environment variables
-3. config file
-4. built-in defaults
-
-### Environment variables
-
-All keys use the `TCG_SCOUT_` prefix:
-
-```bash
-export TCG_SCOUT_OUTPUT=json
-export TCG_SCOUT_LOG_LEVEL=debug
-export TCG_SCOUT_SEARCH_URL="https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17"
-export TCG_SCOUT_TOURNAMENT_URL="https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
-export TCG_SCOUT_OUTPUT_DIR="output/decks"
-export TCG_SCOUT_DECK_CONCURRENCY=4
-```
-
-### Config file
-
-The CLI looks for `.tcg-scout.yaml` in the current directory or home directory, unless `--config` is provided.
-
-Example:
-
-```yaml
-log-level: info
-output: auto
-search-url: https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17
-output-json: output/cards.json
-images-dir: output/images
-user-agent: tcg-scout/1.0
-webp-quality: 100
-image-concurrency: 8
-page-concurrency: 4
-tournament-url: https://en.shadowverse-evolve.com/decks/bcs2526-sydney/
-output-dir: output/decks
-deck-concurrency: 4
-server-addr: :8080
-server-read-timeout: 5s
-server-write-timeout: 30s
-server-idle-timeout: 60s
-server-shutdown-timeout: 10s
-```
-
-## API usage
-
-The same shared service is available over HTTP through the `serve` command.
-
-### 1. Start the API
-
-```bash
-go run ./cmd/tcg-scout serve --addr :8080
-```
-
-### 2. Check health
-
-```bash
-curl http://localhost:8080/healthz
-```
-
-Expected response:
+Solo output (abbreviated):
 
 ```json
 {
-  "status": "ok"
+  "title": "Bushiroad Championship Series 25/26 Event Report—Sydney, Australia",
+  "link": "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/",
+  "date": "Apr. 6, 2026",
+  "identifier": "bcs2526-sydney",
+  "tournament": {
+    "format": "solo",
+    "location": "Sydney, Australia",
+    "entry_count": 32,
+    "decks_total": 32,
+    "decks_scraped": 32,
+    "crawled_at": "2026-07-11T09:00:00Z"
+  },
+  "decks": [
+    {
+      "ranking": 1,
+      "player": "JasonZ",
+      "craft": "Dragoncraft",
+      "wins": 7,
+      "standing_label": "1st place · 7 wins",
+      "deck_id": "5RC61",
+      "deck": {
+        "title": "大哥龙",
+        "craft": "Dragoncraft",
+        "cards": [
+          {
+            "card_number": "BP01-LD07EN",
+            "name": "Rowen",
+            "total": 1,
+            "rarity": "Leader",
+            "craft": "Dragoncraft"
+          }
+        ]
+      }
+    }
+  ]
 }
 ```
 
-### 3. Discover supported games
+Team output uses the same top-level keys; `decks` contains team groups, each with nested player `decks`:
 
-```bash
-curl http://localhost:8080/v1/games
+```json
+{
+  "title": "Bushiroad Summer Festival 2026 Event Report—Manila, Philippines",
+  "link": "https://en.shadowverse-evolve.com/decks/bsf2026-philippines/",
+  "date": "Jul. 6, 2026",
+  "identifier": "bsf2026-philippines",
+  "tournament": {
+    "format": "team",
+    "location": "Manila, Philippines",
+    "team_count": 8,
+    "decks_total": 24,
+    "decks_scraped": 24
+  },
+  "decks": [
+    {
+      "rank": 1,
+      "team_name": "UMR",
+      "team_wins": 4,
+      "standing_label": "1st place team · 4 team wins",
+      "decks": [
+        { "player": "Soar", "craft": "Forestcraft", "deck_id": "17B23", "deck": {} }
+      ]
+    }
+  ]
+}
 ```
 
-### 4. Discover resources for a game
+Failed fetch on a solo row:
 
-```bash
-curl http://localhost:8080/v1/games/sve/resources
+```json
+{
+  "player": "Example",
+  "deck_id": "Not Registered",
+  "deck_fetch_error": "empty decklog response"
+}
 ```
 
-### 5. Discover scrapers for a resource
+`failed_decks` summarizes any Decklog fetch failures at the file level.
+
+| Format | Source | Notes |
+| --- | --- | --- |
+| Solo | BCS regionals | One deck per player; `win_scope: "player"` |
+| Team | BSF team events | `#team-table` only; `win_scope: "team"` |
+
+---
+
+## Configuration
+
+Precedence: **flags → env (`TCG_SCOUT_*`) → `.tcg-scout.yaml` → defaults**
 
 ```bash
-curl http://localhost:8080/v1/games/sve/resources/cards/scrapers
+export TCG_SCOUT_OUTPUT=json
+export TCG_SCOUT_TOURNAMENT_URL="https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
 ```
 
-### 6. List cards through the API
+```yaml
+# ~/.tcg-scout.yaml
+log-level: info
+search-url: https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17
+tournament-url: https://en.shadowverse-evolve.com/decks/bcs2526-sydney/
+output-dir: output/decks
+```
+
+## Legacy aliases
+
+| Old invocation | Rewritten to |
+| --- | --- |
+| `-names-only` | `sve cards official list` |
+| `images-only` | `sve cards official images` |
+| `sve cards scrape` | `sve cards official scrape` |
+| `sve decks scrape` | `sve decks official scrape` |
+| flags only (`--output json`) | `sve cards official scrape` |
+
+## API
+
+```bash
+go run ./cmd/tcg-scout serve --addr :8080
+curl http://localhost:8080/healthz
+```
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/v1/games` | GET | List games |
+| `/v1/games/{game}/resources` | GET | List resources |
+| `/v1/games/{game}/resources/{resource}/scrapers` | GET | List scrapers |
+| `/v1/runs` | POST | Execute an action |
+
+List cards:
 
 ```bash
 curl -X POST http://localhost:8080/v1/runs \
   -H "Content-Type: application/json" \
-  -d '{
-    "game": "sve",
-    "resource": "cards",
-    "scraper": "official",
-    "action": "list",
-    "options": {
-      "search_url": "https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17"
-    }
-  }'
+  -d '{"game":"sve","resource":"cards","scraper":"official","action":"list"}'
 ```
 
-This returns structured JSON with:
-
-- `summary`
-- `cards`
-
-### 7. List tournament decks through the API
+List decks:
 
 ```bash
 curl -X POST http://localhost:8080/v1/runs \
@@ -357,147 +302,21 @@ curl -X POST http://localhost:8080/v1/runs \
     "scraper": "official",
     "action": "list",
     "options": {
-      "tournament_url": "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/",
-      "user_agent": "tcg-scout/1.0",
-      "deck_concurrency": 4
+      "tournament_url": "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/"
     }
   }'
-```
-
-This returns structured JSON with:
-
-- `summary`
-- `tournament`
-
-### 8. Run a full card scrape through the API
-
-```bash
-curl -X POST http://localhost:8080/v1/runs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "game": "sve",
-    "resource": "cards",
-    "scraper": "official",
-    "action": "scrape",
-    "options": {
-      "search_url": "https://en.shadowverse-evolve.com/cards/searchresults/?expansion_name=BP17",
-      "output_json_path": "output/cards.json",
-      "images_dir": "output/images",
-      "user_agent": "tcg-scout/1.0",
-      "webp_quality": 100,
-      "image_concurrency": 8,
-      "page_concurrency": 4
-    }
-  }'
-```
-
-The response contains a summary describing:
-
-- selected game/resource/scraper/action
-- card count
-- output JSON path
-- images directory
-
-### 9. Scrape tournament decks through the API
-
-```bash
-curl -X POST http://localhost:8080/v1/runs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "game": "sve",
-    "resource": "decks",
-    "scraper": "official",
-    "action": "scrape",
-    "options": {
-      "tournament_url": "https://en.shadowverse-evolve.com/decks/bcs2526-sydney/",
-      "output_decks_dir": "output/decks",
-      "user_agent": "tcg-scout/1.0",
-      "deck_concurrency": 4
-    }
-  }'
-```
-
-The response contains a summary describing:
-
-- selected game/resource/scraper/action
-- deck count
-- tournament format (`solo` or `team`)
-- output JSON path
-
-### 10. Rebuild images from existing JSON through the API
-
-```bash
-curl -X POST http://localhost:8080/v1/runs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "game": "sve",
-    "resource": "cards",
-    "scraper": "official",
-    "action": "images",
-    "options": {
-      "output_json_path": "output/cards.json",
-      "images_dir": "output/images"
-    }
-  }'
-```
-
-### API error behavior
-
-- `400` for invalid execution requests
-- `404` for unknown game/resource discovery routes
-- `200` for successful discovery and runs
-
-## Build
-
-Development build:
-
-```bash
-go build -o bin/tcg-scout ./cmd/tcg-scout
-```
-
-Versioned build:
-
-```bash
-go build \
-  -ldflags "-X main.version=1.0.0 -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -o bin/tcg-scout \
-  ./cmd/tcg-scout
-```
-
-## Shell completion
-
-```bash
-go run ./cmd/tcg-scout completion bash
-go run ./cmd/tcg-scout completion zsh
-go run ./cmd/tcg-scout completion fish
-go run ./cmd/tcg-scout completion powershell
 ```
 
 ## Development
 
-Run tests:
-
 ```bash
 go test ./...
+go run ./cmd/tcg-scout completion bash
+make build    # injects version, commit, date via ldflags
 ```
 
-Run the API locally:
+### Add a game or scraper
 
-```bash
-go run ./cmd/tcg-scout serve
-```
-
-## Extending the catalog
-
-To add another scraper:
-
-1. Implement a new runner that satisfies the shared `internal/app.Runner` contract.
+1. Implement `internal/app.Runner` in `internal/tcg/<game>/<resource>/`.
 2. Register it in `cmd/tcg-scout/main.go`.
-3. Expose the new game/resource/scraper metadata through the runner definition.
-
-Once registered, the new scraper automatically becomes available to:
-
-- interactive CLI flows
-- discovery commands
-- API discovery endpoints
-- action execution paths
+3. Document it under **Games** in this README.

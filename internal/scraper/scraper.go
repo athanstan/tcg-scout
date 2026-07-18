@@ -43,7 +43,7 @@ var (
 	effectIconAltPattern  = regexp.MustCompile(`alt="\[([a-z0-9]+)\]"`)
 	craftNames            = []string{"Forestcraft", "Swordcraft", "Runecraft", "Dragoncraft", "Abysscraft", "Havencraft", "Neutral"}
 	craftIDs              = map[string]int{"Forestcraft": 1, "Swordcraft": 2, "Runecraft": 3, "Dragoncraft": 4, "Abysscraft": 5, "Havencraft": 6, "Neutral": 7}
-	rarityIDs             = map[string]int{"-": 100, "Bronze": 1, "Bronze / Premium": 2, "Silver": 3, "Silver / Premium": 4, "Gold": 5, "Gold / Premium": 6, "Legendary": 7, "Super Legendary": 8, "Ultimate": 9, "Special": 10, "Premium": 13}
+	rarityIDs             = map[string]int{"-": 100, "Bronze": 1, "Bronze / Premium": 2, "Silver": 3, "Silver / Premium": 4, "Gold": 5, "Gold / Premium": 6, "Legendary": 7, "Super Legendary": 8, "Ultimate": 9, "Special": 10, "Promo": 11, "Premium": 13}
 	effectIconAbilities   = map[string]string{"fanfare": "Fanfare", "lastwords": "Last Words", "strike": "Strike", "clash": "Clash", "enhance": "Enhance"}
 	httpClient            = &http.Client{Timeout: 30 * time.Second}
 )
@@ -286,7 +286,8 @@ func collectCards(ctx context.Context, cfg Config) ([]Card, error) {
 	for idx := range bundle.cards {
 		craftName, ok := craftByID[bundle.cards[idx].ID]
 		if !ok {
-			return nil, fmt.Errorf("missing craft mapping for %s", bundle.cards[idx].ID)
+			slog.Warn("missing craft mapping, defaulting to Neutral", "card_id", bundle.cards[idx].ID)
+			craftName = "Neutral"
 		}
 		rarityID, ok := rarityIDs[bundle.cards[idx].Rarity]
 		if !ok {
@@ -400,6 +401,7 @@ func downloadImages(ctx context.Context, cfg Config, cards []Card, mu *sync.Mute
 	defer cancel()
 
 	collector := newCollector(ctx, cfg, true)
+	collector.AllowURLRevisit = true
 	var (
 		firstErr error
 		errMu    sync.Mutex
@@ -647,6 +649,12 @@ func buildTextViewURL(searchURL *url.URL) *url.URL {
 func buildCraftTextURL(textURL *url.URL, craftName string) *url.URL {
 	u := *textURL
 	query := u.Query()
+	for key := range query {
+		if key == "class" || key == "class[]" || strings.HasPrefix(key, "class[") {
+			query.Del(key)
+		}
+	}
+	query.Set("class[0]", craftName)
 	query.Set("s_param", craftName)
 	u.RawQuery = query.Encode()
 	return &u
